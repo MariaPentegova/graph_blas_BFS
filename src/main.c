@@ -1,8 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 #include "GraphBLAS.h"
 #include "LAGraph.h"
+#include "algoritms_bfs.c"
+
+int MultiSource_BFS(GrB_Vector *levels, GrB_Vector *parents, GrB_Matrix A, GrB_Vector sources);
+int Parent_BFS(GrB_Vector *levels, GrB_Vector *parents, GrB_Matrix A, GrB_Index start_node, const char *label);
+
 
 int generate_random_graph(GrB_Matrix *A, int num_nodes, float density) {
     if (GrB_Matrix_new(A, GrB_BOOL, num_nodes, num_nodes) != GrB_SUCCESS) {
