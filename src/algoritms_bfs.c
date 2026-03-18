@@ -1,133 +1,180 @@
-#include "GraphBLAS.h"
+// от нескольких источников 
+
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <GraphBLAS.h>
+#include <LAGraph.h>
 
-#define CHECK(status) do { if (status != GrB_SUCCESS) { printf("Error at line %d\n", __LINE__); return -1; } } while (0)
-
-int initialize_vectors(GrB_Vector *levels, GrB_Vector *parents, GrB_Index n) {
-    if (GrB_Vector_new(levels, GrB_INT32, n) != GrB_SUCCESS) return -1;
-    if (GrB_Vector_new(parents, GrB_INT32, n) != GrB_SUCCESS) {
-        GrB_Vector_free(levels);
-        return -1;
-    }
-    for (GrB_Index i = 0; i < n; i++) {
-        GrB_Vector_setElement(*levels, -1, i);
-        GrB_Vector_setElement(*parents, -1, i);
-    }
-    return 0;
-}
-
-
-int MultiSource_BFS(GrB_Vector *levels, GrB_Vector *parents, GrB_Matrix A, GrB_Vector sources) {
+int bfs_multi_source(GrB_Matrix A, GrB_Vector dist, GrB_Index *starts, GrB_Index num_starts) {
+    GrB_Info info;
     GrB_Index n;
-    CHECK(GrB_Matrix_nrows(&n, A));
 
-    if (initialize_vectors(levels, parents, n) != 0) return -1;
+    GrB_Matrix_nrows(&n, A);
+
+    GrB_Vector visited = NULL, frontier = NULL, new_frontier = NULL;
+    GrB_Vector_new(&visited, GrB_BOOL, n);
+    GrB_Vector_new(&frontier, GrB_BOOL, n);
+    GrB_Vector_new(&new_frontier, GrB_BOOL, n);
 
     for (GrB_Index i = 0; i < n; i++) {
-        bool has_source;
-        if (GrB_Vector_extractElement(&has_source, sources, i) == GrB_SUCCESS && has_source) {
-            CHECK(GrB_Vector_setElement(*levels, 0, i));
-            CHECK(GrB_Vector_setElement(*parents, i, i));
-        }
+        GrB_Vector_setElement_INT32(dist, -1, i);
     }
 
-    GrB_Vector frontier = NULL, new_frontier = NULL;
-    CHECK(GrB_Vector_new(&frontier, GrB_BOOL, n));
-    CHECK(GrB_Vector_new(&new_frontier, GrB_BOOL, n));
+    for (GrB_Index i = 0; i < num_starts; i++) {
+        GrB_Vector_setElement_BOOL(frontier, true, starts[i]);
+        GrB_Vector_setElement_BOOL(visited, true, starts[i]);
+        GrB_Vector_setElement_INT32(dist, 0, starts[i]);
+    }
 
-    CHECK(GrB_assign(frontier, NULL, NULL, true, sources, NULL));
-
-    int current_level = 0;
+    int level = 0;
 
     while (true) {
-        bool frontier_exists = false;
-        CHECK(GrB_reduce(&frontier_exists, NULL, GrB_LOR_MONOID_BOOL, frontier, NULL));
-        if (!frontier_exists) break;
+        GrB_mxv(new_frontier, visited, NULL, LAGraph_LorLand_BOOL, A, frontier, NULL);
 
-        CHECK(GrB_vxm(&new_frontier, NULL, NULL, GrB_LOR_SEMIRING_BOOL, A, frontier, NULL));
+        GrB_Vector not_visited = NULL;
+        GrB_Vector_new(&not_visited, GrB_BOOL, n);
+        GrB_Vector_assign_BOOL(not_visited, NULL, NULL, true, GrB_ALL, n, NULL);
+        GrB_eWiseAdd_BinaryOp(not_visited, NULL, NULL, GrB_LAND, not_visited, visited, NULL);
+        GrB_apply(not_visited, NULL, NULL, GrB_LNOT, not_visited, NULL);
 
-        for (GrB_Index i = 0; i < n; i++) {
-            bool reached;
-            if (GrB_Vector_extractElement(&reached, new_frontier, i) == GrB_SUCCESS && reached) {
-                int32_t curr_level;
-                if (GrB_Vector_extractElement(&curr_level, *levels, i) != GrB_SUCCESS || curr_level == -1) {
-                    CHECK(GrB_Vector_setElement(*levels, current_level + 1, i));
-                }
+        GrB_eWiseMult_BinaryOp(new_frontier, NULL, NULL, GrB_LAND, new_frontier, not_visited, NULL);
 
-                int32_t parent_value;
-                if (GrB_Vector_extractElement(&parent_value, *parents, i) != GrB_SUCCESS || parent_value == -1) {
-                    int index;
-                    if (GrB_Vector_extractElement(&index, frontier, i) == GrB_SUCCESS) {
-                        CHECK(GrB_Vector_setElement(*parents, index, i));
-                    }
-                }
-            }
+        GrB_Vector_free(&not_visited);
+
+        GrB_Index nvals;
+        GrB_Vector_nvals(&nvals, new_frontier);
+        if (nvals == 0) {
+            break;
         }
 
-        GrB_Vector tmp = frontier;
-        frontier = new_frontier;
-        new_frontier = tmp;
-        CHECK(GrB_Vector_clear(new_frontier));
-        current_level++;
+        GrB_Index *indices = malloc(nvals * sizeof(GrB_Index));
+        bool *values = malloc(nvals * sizeof(bool));
+        GrB_Vector_extractTuples_BOOL(indices, values, &nvals, new_frontier);
+
+        for (GrB_Index i = 0; i < nvals; i++) {
+            GrB_Vector_setElement_INT32(dist, level + 1, indices[i]);
+            GrB_Vector_setElement_BOOL(visited, true, indices[i]);
+        }
+
+        free(indices);
+        free(values);
+
+        GrB_Vector_clear(frontier);
+        GrB_Vector_dup(&frontier, new_frontier);
+
+        level++;
     }
 
-    if (frontier) GrB_Vector_free(&frontier);
-    if (new_frontier) GrB_Vector_free(&new_frontier);
+    GrB_Vector_free(&visited);
+    GrB_Vector_free(&frontier);
+    GrB_Vector_free(&new_frontier);
 
     return 0;
 }
 
 
-int Parent_BFS(GrB_Vector *levels, GrB_Vector *parents, GrB_Matrix A, GrB_Index start_node, const char *label) {
+// с построением дерева обхода
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <GraphBLAS.h>
+#include <LAGraph.h>  
+
+int bfs_tree(GrB_Matrix A, GrB_Vector dist, GrB_Vector parent, GrB_Index start) {
+    GrB_Info info;
     GrB_Index n;
-    CHECK(GrB_Matrix_nrows(&n, A));
 
-    if (initialize_vectors(levels, parents, n) != 0) return -1;
+    GrB_Matrix_nrows(&n, A);
 
-    CHECK(GrB_Vector_setElement(*levels, 0, start_node));
-    CHECK(GrB_Vector_setElement(*parents, start_node, start_node));
+    GrB_Vector visited = NULL, frontier = NULL, new_frontier = NULL;
+    GrB_Vector_new(&visited, GrB_BOOL, n);
+    GrB_Vector_new(&frontier, GrB_BOOL, n);
+    GrB_Vector_new(&new_frontier, GrB_BOOL, n);
 
-    GrB_Vector frontier = NULL, new_frontier = NULL;
-    CHECK(GrB_Vector_new(&frontier, GrB_BOOL, n));
-    CHECK(GrB_Vector_new(&new_frontier, GrB_BOOL, n));
+    GrB_assign(dist, NULL, NULL, -1, GrB_ALL, n, NULL);
+    GrB_assign(parent, NULL, NULL, -1, GrB_ALL, n, NULL);
 
-    CHECK(GrB_Vector_setElement(frontier, true, start_node));
+    GrB_Vector_setElement(frontier, true, start);
+    GrB_Vector_setElement(visited, true, start);
+    GrB_Vector_setElement(dist, 0, start);
 
-    int current_level = 0;
+    int level = 0;
 
-    while (true) {
-
-        bool frontier_exists = false;
-        CHECK(GrB_reduce(&frontier_exists, NULL, GrB_LOR_MONOID_BOOL, frontier, NULL));
-        if (!frontier_exists) break;
-
-        CHECK(GrB_vxm(&new_frontier, NULL, NULL, GrB_LOR_SEMIRING_BOOL, A, frontier, NULL));
-
-        for (GrB_Index i = 0; i < n; i++) {
-            bool reached;
-            if (GrB_Vector_extractElement(&reached, new_frontier, i) == GrB_SUCCESS && reached) {
-                int32_t curr_level;
-                if (GrB_Vector_extractElement(&curr_level, *levels, i) != GrB_SUCCESS || curr_level == -1) {
-                    CHECK(GrB_Vector_setElement(*levels, current_level + 1, i));
-                }
-
-                int parent_index;
-                if (GrB_Vector_extractElement(&parent_index, frontier, i) == GrB_SUCCESS) {
-                    CHECK(GrB_Vector_setElement(*parents, parent_index, i));
-                }
-            }
-        }
-
-        GrB_Vector tmp = frontier;
-        frontier = new_frontier;
-        new_frontier = tmp;
-        CHECK(GrB_Vector_clear(new_frontier));
-
-        current_level++;
+    GrB_Index *rows = malloc(n * sizeof(GrB_Index));
+    for (GrB_Index i = 0; i < n; i++) {
+        rows[i] = i;
     }
 
-    if (frontier) GrB_Vector_free(&frontier);
-    if (new_frontier) GrB_Vector_free(&new_frontier);
+    while (true) {
+        GrB_mxv(new_frontier, visited, NULL, LAGraph_LorLand_BOOL, A, frontier, NULL);
 
-    return 0;
-}
+        GrB_Vector not_visited = NULL;
+        GrB_Vector_new(&not_visited, GrB_BOOL, n);
+        GrB_assign(not_visited, NULL, NULL, true, GrB_ALL, n, NULL);
+        GrB_eWiseAdd_BinaryOp(not_visited, NULL, NULL, GrB_LAND, not_visited, visited, NULL);
+        GrB_apply(not_visited, NULL, NULL, GrB_LNOT, not_visited, NULL);
+
+        GrB_eWiseMult_BinaryOp(new_frontier, NULL, NULL, GrB_LAND, new_frontier, not_visited, NULL);
+        GrB_Vector_free(&not_visited);
+
+        GrB_Index nvals;
+        GrB_Vector_nvals(&nvals, new_frontier);
+        if (nvals == 0) {
+            break;  
+        }
+
+        GrB_Index *indices = malloc(nvals * sizeof(GrB_Index));
+        bool *values = malloc(nvals * sizeof(bool));
+        GrB_Vector_extractTuples_BOOL(indices, values, &nvals, new_frontier);
+
+        for (GrB_Index i = 0; i < nvals; i++) {
+            GrB_Index v = indices[i];
+
+            GrB_Vector_setElement(dist, level + 1, v);
+            GrB_Vector_setElement(visited, true, v);
+
+            GrB_Vector col_v;
+            GrB_Vector_new(&col_v, GrB_BOOL, n);
+            info = GrB_extract(col_v, NULL, NULL, A, rows, n, &v, 1, NULL);
+            if (info != GrB_SUCCESS) {
+                fprintf(stderr, "Ошибка при извлечении столбца %lu\n", v);
+                free(indices);
+                free(values);
+                free(rows);
+                GrB_Vector_free(&col_v);
+                return info;
+            }
+
+            GrB_Vector parent_candidates;
+            GrB_Vector_new(&parent_candidates, GrB_BOOL, n);
+            GrB_eWiseMult_BinaryOp(parent_candidates, NULL, NULL, GrB_LAND, col_v, frontier, NULL);
+
+            GrB_Index pc_nvals;
+            GrB_Vector_nvals(&pc_nvals, parent_candidates);
+            if (pc_nvals > 0) {
+                GrB_Index *pc_indices = malloc(pc_nvals * sizeof(GrB_Index));
+                bool *pc_values = malloc(pc_nvals * sizeof(bool));
+                GrB_Vector_extractTuples_BOOL(pc_indices, pc_values, &pc_nvals, parent_candidates);
+
+                GrB_Vector_setElement(parent, pc_indices[0], v);
+                
+                free(pc_indices);
+                free(pc_values);
+            } else {
+                GrB_Vector_setElement(parent, -1, v);
+            }
+
+            GrB_Vector_free(&col_v);
+            GrB_Vector_free(&parent_candidates);
+        }
+
+        free(indices);
+        free(values);
+
+        GrB_Vector_clear(frontier);
+        GrB_Vector_dup(&frontier, new_frontier);
+
+        level++;
+    }
