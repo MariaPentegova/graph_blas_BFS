@@ -1,0 +1,6 @@
+[submodule "external/GraphBLAS"]
+	path = external/GraphBLAS
+	url = https://github.com/MariaPentegova/graph_blas_BFS
+[submodule "external/LAGraph"]
+	path = external/LAGraph
+	url = https://github.com/MariaPentegova/graph_blas_BFS
